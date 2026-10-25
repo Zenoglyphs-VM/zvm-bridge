@@ -118,6 +118,7 @@ func runBridge(args []string) error {
 		return err
 	}
 	mux := http.NewServeMux()
+	mux.Handle("/observations", br.ObservationHandler())
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		s, err := br.Status(r.Context())
 		if err != nil {
