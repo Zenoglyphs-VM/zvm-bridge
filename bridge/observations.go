@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/big"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -29,10 +30,12 @@ const observationTimeout = 15 * time.Second
 // "observed" describes a complete, self-consistent reader sample. It does not
 // establish independent canonicality, custody authority or economic acceptance.
 type OperationalObservations struct {
-	Schema     int              `json:"schema"`
-	ObservedAt int64            `json:"observedAt"`
-	Queue      QueueObservation `json:"queue"`
-	Peg        PegObservation   `json:"peg"`
+	Schema              int                `json:"schema"`
+	ObservedAt          int64              `json:"observedAt"`
+	ConfigurationSHA256 string             `json:"configurationSha256"`
+	Queue               QueueObservation   `json:"queue"`
+	Peg                 PegObservation     `json:"peg"`
+	Signers             SignerObservations `json:"signers"`
 }
 
 type QueueObservation struct {
@@ -71,7 +74,19 @@ func (b *Bridge) Observations(ctx context.Context) OperationalObservations {
 	ctx, cancel := context.WithTimeout(ctx, observationTimeout)
 	defer cancel()
 	now := time.Now().Unix()
-	return OperationalObservations{Schema: 1, ObservedAt: now, Queue: b.observeQueue(ctx, now), Peg: b.observePeg(ctx)}
+	out := OperationalObservations{Schema: 1, ObservedAt: now, Queue: b.observeQueue(ctx, now)}
+	if b.cfg.Rollup != nil {
+		if raw, err := json.Marshal(b.cfg.Rollup); err == nil {
+			digest := sha256.Sum256(raw)
+			out.ConfigurationSHA256 = hex.EncodeToString(digest[:])
+		}
+	}
+	var reads sync.WaitGroup
+	reads.Add(2)
+	go func() { defer reads.Done(); out.Peg = b.observePeg(ctx) }()
+	go func() { defer reads.Done(); out.Signers = b.observeSigners(ctx) }()
+	reads.Wait()
+	return out
 }
 
 // ObservationHandler admits one collection per installed handler. Rejected

@@ -55,6 +55,27 @@ does not establish full ZNN backing. QSR values are consistent observations
 reported by the configured readers, not independent canonicality or reserve
 proofs. Concurrent events after the rechecks remain possible.
 
+## Optional member observation contract
+
+The response now includes the typed bridge configuration digest at the top level
+and `signers`. A vault signer can implement `SignerMonitoringSource` to provide
+public member node points, checked times, threshold and a separately accepted
+committee configuration digest. Sources must bind replies to their independently
+provisioned member authority and omit keys, credentials, URLs and raw errors.
+
+This package defines the interface and a bounded required-field momentum reader.
+It does not adopt an authenticated committee/member implementation. Unsupported
+and single-key signers explicitly return `not_configured`; that state cannot
+qualify a complete committee freshness check. A consumer must validate member
+inventory, sample and node ages, chain identity and lag using an accepted policy.
+Fresh response time alone does not make an old node fresh.
+
+Peg and optional member reads run concurrently after the queue read transaction
+ends, share the collection deadline, and both join before the response returns.
+These points remain reader observations. Authentication, complete alert policies
+and real operator/custody acceptance require their separate implementations and
+qualification.
+
 ## Operator triage and remaining alert work
 
 An unavailable sample requires investigation of its fixed reason and source
