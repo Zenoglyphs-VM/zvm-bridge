@@ -97,3 +97,16 @@ it does not install thresholds, probe signers, send alerts or prove real operato
 acceptance. Full native ZNN liability accounting also needs a separately
 specified authoritative source. Local HTTP/SQLite fixtures do not establish
 real chain state, recipient delivery, deployment or production readiness.
+
+## Native CI result scope
+
+The Linux component and race commands emit named Go JSON test events and run
+without cached test results. Component tests have a three-minute package
+deadline and race tests a five-minute package deadline; the existing job has
+a ten-minute overall deadline. Build, vet, all packages, the Core gitlink and
+the existing observation fixtures remain included. Individual passes, skips,
+failures and actual command completion must be retained before qualification.
+
+These component fixtures do not establish independent NoM authority, a deployed
+monitor, recipient delivery, operator acceptance or production readiness. A
+source change or successful workflow status alone is not runtime evidence.
