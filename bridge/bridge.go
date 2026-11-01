@@ -102,6 +102,10 @@ type Bridge struct {
 	lastError   string
 	lastErrorAt time.Time
 	lastOK      time.Time
+	healthy     bool
+	sweepAt     time.Time
+	sweeping    bool
+	steps       map[string]StepStatus
 	received    uint64
 	deferred    int
 
@@ -127,31 +131,14 @@ func (b *Bridge) Run(ctx context.Context) error {
 	ticker := time.NewTicker(b.cfg.Poll)
 	defer ticker.Stop()
 	for {
-		for _, step := range []struct {
-			name string
-			fn   func(context.Context) error
-		}{
-			{"receiving deposits", b.receiveDeposits},
-			{"scanning withdrawals", b.scanWithdrawals},
-			{"paying withdrawals", b.payWithdrawals},
-			{"confirming payouts", b.confirmPayouts},
-			{"funding the vault's plasma", b.fundPlasma},
-		} {
-			err := step.fn(ctx)
-			if errors.Is(err, context.Canceled) {
-				continue
-			}
-			b.mu.Lock()
-			if err != nil {
-				b.cfg.Log.Warn(step.name, "err", err)
-				b.lastError, b.lastErrorAt = fmt.Sprintf("%s: %v", step.name, err), time.Now()
-			} else {
-				// A sweep that succeeded is the answer to "is the bridge
-				// working"; without this, one transient DNS failure at startup
-				// reads as a broken bridge for the life of the process.
-				b.lastOK = time.Now()
-			}
-			b.mu.Unlock()
+		if err := b.runSweep(ctx, []bridgeStep{
+			{"receive_deposits", b.receiveDeposits},
+			{"scan_withdrawals", b.scanWithdrawals},
+			{"pay_withdrawals", b.payWithdrawals},
+			{"confirm_payouts", b.confirmPayouts},
+			{"fund_plasma", b.fundPlasma},
+		}); err != nil {
+			return err
 		}
 		select {
 		case <-ctx.Done():
@@ -159,6 +146,77 @@ func (b *Bridge) Run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+type bridgeStep struct {
+	name string
+	fn   func(context.Context) error
+}
+
+// StepStatus describes the current sweep's work, not a cumulative success
+// counter. Times let observers distinguish an idle step from a stopped loop.
+type StepStatus struct {
+	State      string `json:"state"`
+	StartedAt  string `json:"startedAt,omitempty"`
+	FinishedAt string `json:"finishedAt,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// runSweep continues independent work after an operational error, so receiving
+// trouble does not itself prevent withdrawal reconciliation. Only a complete
+// successful sweep restores health. Cancellation stops further work immediately.
+func (b *Bridge) runSweep(ctx context.Context, steps []bridgeStep) error {
+	b.mu.Lock()
+	b.sweeping = true
+	b.healthy = false
+	b.steps = make(map[string]StepStatus, len(steps))
+	for _, step := range steps {
+		b.steps[step.name] = StepStatus{State: "not_run"}
+	}
+	b.mu.Unlock()
+	success := len(steps) > 0
+	var canceled error
+	for _, step := range steps {
+		started := time.Now().UTC().Format(time.RFC3339Nano)
+		b.mu.Lock()
+		b.steps[step.name] = StepStatus{State: "running", StartedAt: started}
+		b.mu.Unlock()
+		err := ctx.Err()
+		if err == nil {
+			err = step.fn(ctx)
+		}
+		// A step that returned nil after its caller canceled is incomplete.
+		if err == nil {
+			err = ctx.Err()
+		}
+		now := time.Now()
+		result := StepStatus{State: "succeeded", StartedAt: started, FinishedAt: now.UTC().Format(time.RFC3339Nano)}
+		if err != nil {
+			success = false
+			result.State, result.Error = "failed", err.Error()
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				result.State, canceled = "canceled", err
+			}
+			b.cfg.Log.Warn(step.name, "err", err)
+		}
+		b.mu.Lock()
+		b.steps[step.name] = result
+		if err != nil {
+			b.healthy = false
+			b.lastError, b.lastErrorAt = fmt.Sprintf("%s: %v", step.name, err), now
+		}
+		b.mu.Unlock()
+		if canceled != nil {
+			break
+		}
+	}
+	b.mu.Lock()
+	b.sweeping, b.sweepAt, b.healthy = false, time.Now(), success
+	if success {
+		b.lastOK = b.sweepAt
+	}
+	b.mu.Unlock()
+	return canceled
 }
 
 // receiveDeposits publishes a receive for every unreceived send to the vault.
@@ -527,15 +585,18 @@ type Status struct {
 	LockedZNNOnZVM string         `json:"lockedZNNOnZVM"`
 	// The withdrawal fee (D8): what it has earned, and what of the QSR part has
 	// gone to the vault's plasma.
-	FeesZNN     string   `json:"feesZNN,omitempty"`
-	FeesQSR     string   `json:"feesQSR,omitempty"`
-	FusedQSR    string   `json:"fusedQSR,omitempty"`
-	Funding     *Funding `json:"funding,omitempty"`
-	FusedBlocks []string `json:"fusedBlocksThisRun,omitempty"`
-	LastError   string   `json:"lastError,omitempty"`
-	LastErrorAt string   `json:"lastErrorAt,omitempty"`
-	LastOKAt    string   `json:"lastOkAt,omitempty"`
-	Healthy     bool     `json:"healthy"`
+	FeesZNN     string                `json:"feesZNN,omitempty"`
+	FeesQSR     string                `json:"feesQSR,omitempty"`
+	FusedQSR    string                `json:"fusedQSR,omitempty"`
+	Funding     *Funding              `json:"funding,omitempty"`
+	FusedBlocks []string              `json:"fusedBlocksThisRun,omitempty"`
+	LastError   string                `json:"lastError,omitempty"`
+	LastErrorAt string                `json:"lastErrorAt,omitempty"`
+	LastOKAt    string                `json:"lastOkAt,omitempty"`
+	Healthy     bool                  `json:"healthy"`
+	LastSweepAt string                `json:"lastSweepAt,omitempty"`
+	Sweeping    bool                  `json:"sweepInProgress"`
+	Steps       map[string]StepStatus `json:"steps"`
 }
 
 func (b *Bridge) Status(ctx context.Context) (*Status, error) {
@@ -574,7 +635,13 @@ func (b *Bridge) Status(ctx context.Context) (*Status, error) {
 	if bal, err := b.cfg.Eth.BalanceAt(ctx, rollup.BridgeAddr, nil); err == nil {
 		s.LockedZNNOnZVM = bal.String()
 	}
+	b.populateHealth(s)
+	return s, nil
+}
+
+func (b *Bridge) populateHealth(s *Status) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	s.Received, s.LastError, s.Deferred = b.received, b.lastError, b.deferred
 	s.Funding, s.FusedBlocks = b.lastFunding, append([]string(nil), b.fusedBlocks...)
 	if !b.lastErrorAt.IsZero() {
@@ -583,10 +650,14 @@ func (b *Bridge) Status(ctx context.Context) (*Status, error) {
 	if !b.lastOK.IsZero() {
 		s.LastOKAt = b.lastOK.UTC().Format(time.RFC3339)
 	}
-	// Healthy means the most recent sweep worked, not that nothing ever failed.
-	s.Healthy = b.lastOK.After(b.lastErrorAt)
-	b.mu.Unlock()
-	return s, nil
+	if !b.sweepAt.IsZero() {
+		s.LastSweepAt = b.sweepAt.UTC().Format(time.RFC3339Nano)
+	}
+	s.Healthy, s.Sweeping = b.healthy, b.sweeping
+	s.Steps = make(map[string]StepStatus, len(b.steps))
+	for name, step := range b.steps {
+		s.Steps[name] = step
+	}
 }
 
 // EncodeWithdrawZNN is calldata for withdrawZNN(nomRecipient).

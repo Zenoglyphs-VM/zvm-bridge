@@ -11,6 +11,7 @@ permissions:
 jobs:
   go:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,4 +23,7 @@ jobs:
 
       - run: go build ./...
       - run: go vet ./...
-      - run: go test ./...
+      - name: Run uncached component tests with named JSON results
+        run: go test -json -count=1 -timeout=3m ./...
+      - name: Run uncached race controls with named JSON results
+        run: go test -race -json -count=1 -timeout=5m ./...
