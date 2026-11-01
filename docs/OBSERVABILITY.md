@@ -110,3 +110,21 @@ failures and actual command completion must be retained before qualification.
 These component fixtures do not establish independent NoM authority, a deployed
 monitor, recipient delivery, operator acceptance or production readiness. A
 source change or successful workflow status alone is not runtime evidence.
+
+## Complete sweep health
+
+The aggregate health flag is false before and during a sweep. It becomes true
+only after receiving deposits, scanning withdrawals, paying withdrawals,
+confirming payouts and funding plasma all succeed in that sweep. A later no-op
+cannot erase an earlier failure. Operational failures allow independent later
+work; cancellation stops the remaining steps. No payout, receive, queue or
+journal semantics change in this health-only update.
+
+The status response includes sweepInProgress, lastSweepAt and five named step
+records with state, startedAt, finishedAt and an optional error. lastOkAt remains
+the previous complete success until a new complete success. Returned maps are
+independent snapshots. The Status consumer must be upgraded with this producer:
+an old aggregate-only response does not establish complete-step health. This
+wire contract uses process wall-clock timestamps, not independently verified
+chain or custody evidence. Actual external monitoring deployment remains an
+operator acceptance gate.
